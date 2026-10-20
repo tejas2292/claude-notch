@@ -22,8 +22,8 @@ cd claude-notch
 claude-notch-hook --test done      # also: input, blocked
 ```
 
-`install.sh` compiles one Swift file, copies the hook to `~/.local/bin`, adds three hooks (`Stop`, `Notification`,
-`StopFailure`) to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) after backing it up, and starts
+`install.sh` compiles one Swift file, copies the hook to `~/.local/bin`, adds four hooks (`Stop`, `Notification`,
+`StopFailure`, `SessionEnd`) to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) after backing it up, and starts
 the app at login. Re-running it is safe. `./uninstall.sh` removes all of it.
 
 ## How it works
@@ -31,7 +31,10 @@ the app at login. Re-running it is safe. `./uninstall.sh` removes all of it.
 Claude Code runs `claude-notch-hook` on each event. The hook writes one small file into `~/.claude-notch/`. The app
 polls that folder and animates the panel.
 
-- **Stop** shows *All done*, **Notification** shows *Needs your input*, **StopFailure** shows *Blocked*.
+- **Stop** shows *All done*, **Notification** shows *Needs your input*, **StopFailure** shows *Blocked*, **SessionEnd** removes the session.
+- With several Claude Code terminals open, the panel lists the new event plus up to two other sessions still waiting on
+  you or blocked. **Click a row to jump to that terminal**: the exact tab in Terminal.app and iTerm2 (matched by tty;
+  macOS asks once to let claude-notch control them), just the app for Ghostty, Warp, kitty and VS Code.
 - A "done" banner is skipped while a terminal (Terminal, iTerm2, Ghostty, Warp, kitty, Alacritty, VS Code, Cursor) is
   the front app, since you are already looking at it. The other two always show.
 - A short sound plays per state. Mute it with `touch ~/.claude-notch/mute`.
@@ -40,7 +43,7 @@ polls that folder and animates the panel.
 
 Privacy is the point of keeping it small:
 
-- It stores **only** the state and the project folder name. It never stores or reads your prompts, tool input,
+- It stores **only** the state, the project folder name, the session id and where the terminal is (tty, process id, app). It never stores or reads your prompts, tool input,
   Claude's messages or the session transcript.
 - No network access and no listening socket. The app and the hook only share files in `~/.claude-notch/`.
 - It cannot approve permission prompts or send replies to Claude. It only tells you to go back to the terminal.
@@ -51,11 +54,14 @@ Privacy is the point of keeping it small:
   that is untested.
 - Which moments Claude Code reports through `Notification` (permission prompts, questions, idle waiting) is up to
   Claude Code. If a moment you care about does not trigger the robot, open an issue with what happened.
+- Click-to-focus on the exact tab is tested on Terminal.app only. The iTerm2 path is written but untested.
+- A permission prompt you answer in the terminal leaves its row showing "needs your input" until that session's next
+  event or until you click it, because Claude Code fires no hook when you answer.
 - The robot is original pixel art in the spirit of the Claude Code mascot, not Anthropic's artwork.
 
 ## Alternatives
 
-Other projects do notch notifications for Claude Code, with more features (session lists, approving permissions
+Other projects do notch notifications for Claude Code, with more features (approving permissions
 from the notch): [cc-island](https://github.com/bistin/cc-island),
 [Vibe Notch](https://github.com/farouqaldori/vibe-notch), [Notch Island](https://github.com/AEllison98/notch-island).
 This one is the small, read-nothing version.

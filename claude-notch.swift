@@ -22,12 +22,22 @@ enum Kind: String {
     }
 }
 
+/// One Claude Code session: its last state and where its terminal is, so a click can bring that terminal forward.
+struct Session: Identifiable {
+    let id: String
+    var project: String
+    var kind: Kind
+    var tty: String, bundle: String
+    var pid: Int32
+    var ts: Double
+}
+
 final class Model: ObservableObject {
-    @Published var kind: Kind = .done
-    @Published var project = ""
+    @Published var rows: [Session] = []
     @Published var expanded = false
     @Published var wave = false
     var onTap: () -> Void = {}
+    var onRow: (Session) -> Void = { _ in }
 }
 
 /// Pixel-art robot in the Claude Code mascot's style (orange block body, square eyes, little legs), drawn on a 14x11 grid.
@@ -79,19 +89,25 @@ struct IslandView: View {
             ZStack(alignment: .bottom) {
                 UnevenRoundedRectangle(bottomLeadingRadius: 26, bottomTrailingRadius: 26).fill(Color.black)
                 if m.expanded {
-                    HStack(spacing: 12) {
-                        Robot(kind: m.kind)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(m.kind.title).font(.system(size: 15, weight: .semibold)).foregroundColor(m.kind.tint)
-                            Text(m.kind.subtitle(m.project)).font(.system(size: 12)).foregroundColor(.white.opacity(0.75)).lineLimit(1)
+                    VStack(spacing: 6) {
+                        ForEach(m.rows) { r in
+                            HStack(spacing: 12) {
+                                Robot(kind: r.kind)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(r.kind.title).font(.system(size: 15, weight: .semibold)).foregroundColor(r.kind.tint)
+                                    Text(r.kind.subtitle(r.project)).font(.system(size: 12)).foregroundColor(.white.opacity(0.75)).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .frame(height: 44).contentShape(Rectangle())
+                            .onTapGesture { m.onRow(r) }
                         }
-                        Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 24).padding(.bottom, 12)
                     .transition(.opacity)
                 }
             }
-            .frame(width: m.expanded ? 380 : notchW, height: m.expanded ? notchH + 56 : notchH)
+            .frame(width: m.expanded ? 380 : notchW, height: m.expanded ? notchH + 12 + CGFloat(max(m.rows.count, 1)) * 50 : notchH)
             .animation(.spring(response: 0.45, dampingFraction: 0.72), value: m.expanded)
             .onTapGesture { m.onTap() }
             Spacer(minLength: 0)
@@ -108,12 +124,14 @@ final class App: NSObject, NSApplicationDelegate {
     let model = Model()
     var panel: NSPanel?
     var generation = 0
+    var sessions: [String: Session] = [:]
     let terminals: Set<String> = ["com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable",
                                   "net.kovidgoyal.kitty", "org.alacritty", "com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92"]
 
     func applicationDidFinishLaunching(_ n: Notification) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         model.onTap = { [weak self] in self?.hide() }
+        model.onRow = { [weak self] r in self?.tap(r) }
         Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in self.poll() }
     }
 
@@ -136,18 +154,83 @@ final class App: NSObject, NSApplicationDelegate {
                let ts = o["ts"] as? Double, Date().timeIntervalSince1970 - ts < 90 { latest = o }
             try? FileManager.default.removeItem(at: f)
         }
-        guard let e = latest, let kind = Kind(rawValue: e["state"] as? String ?? "") else { return }
+        // a session whose claude process is gone (closed terminal, crash) no longer waits for anyone
+        sessions = sessions.filter { $0.value.pid <= 0 || kill($0.value.pid, 0) == 0 || errno != ESRCH }
+        guard let e = latest, let sid = e["sid"] as? String, !sid.isEmpty else { return }
+        if e["state"] as? String == "end" { sessions[sid] = nil; return }
+        guard let kind = Kind(rawValue: e["state"] as? String ?? "") else { return }
+        let s = Session(id: sid, project: e["project"] as? String ?? "session", kind: kind, tty: e["tty"] as? String ?? "",
+                        bundle: e["bundle"] as? String ?? "", pid: Int32(e["pid"] as? Int ?? 0), ts: e["ts"] as? Double ?? 0)
+        sessions[sid] = s
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
         // "done" while you are already looking at the terminal needs no banner; needs-input and blocked always show
         if kind == .done, terminals.contains(front), (e["force"] as? Bool) != true { return }
-        show(kind, e["project"] as? String ?? "session")
+        // this event first, then the other sessions that are still waiting on you
+        let waiting = sessions.values.filter { $0.id != sid && $0.kind != .done }.sorted { $0.ts > $1.ts }
+        show(Array(([s] + waiting).prefix(3)), sound: kind)
     }
 
-    func show(_ kind: Kind, _ project: String) {
+    /// Bring the session's terminal forward: the exact tab in Terminal and iTerm2 (matched by tty), the app for the rest.
+    func focus(_ s: Session) {
+        let ok = s.tty.range(of: #"^ttys\d+$"#, options: .regularExpression) != nil  // tty goes into a script: only a plain tty name
+        var script: String?
+        if ok && s.bundle == "com.apple.Terminal" {
+            script = """
+            tell application "Terminal"
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if tty of t is "/dev/\(s.tty)" then
+                    if miniaturized of w then set miniaturized of w to false
+                    set selected tab of w to t
+                    set index of w to 1
+                    activate
+                    return
+                  end if
+                end repeat
+              end repeat
+            end tell
+            """
+        } else if ok && s.bundle == "com.googlecode.iterm2" {
+            script = """
+            tell application "iTerm2"
+              repeat with w in windows
+                repeat with t in tabs of w
+                  repeat with x in sessions of t
+                    if tty of x is "/dev/\(s.tty)" then
+                      select w
+                      tell w to select t
+                      tell t to select x
+                      activate
+                      return
+                    end if
+                  end repeat
+                end repeat
+              end repeat
+            end tell
+            """
+        }
+        var err: NSDictionary?
+        if let script = script, NSAppleScript(source: script)?.executeAndReturnError(&err) != nil { return }
+        NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == s.bundle }?.activate()
+    }
+
+    func tap(_ s: Session) {
+        focus(s)
+        if s.kind != .done { sessions[s.id] = nil }  // you went to it; the next event puts it back if it still needs you
+        let rest = model.rows.filter { $0.id != s.id }
+        if rest.isEmpty { hide() } else { model.rows = rest; layout() }
+    }
+
+    func layout() {
+        let s = screen(), (_, nh) = notchSize(s)
+        let w: CGFloat = 420, h: CGFloat = nh + 24 + CGFloat(max(model.rows.count, 1)) * 50
+        panel?.setFrame(NSRect(x: s.frame.midX - w / 2, y: s.frame.maxY - h, width: w, height: h), display: true)
+    }
+
+    func show(_ rows: [Session], sound kind: Kind) {
         generation += 1
         let gen = generation
         let s = screen(), (nw, nh) = notchSize(s)
-        let w: CGFloat = 420, h: CGFloat = nh + 70
         if panel == nil {
             let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             p.level = .statusBar
@@ -158,9 +241,8 @@ final class App: NSObject, NSApplicationDelegate {
             panel = p
         }
         panel!.contentView = NSHostingView(rootView: IslandView(m: model, notchW: nw, notchH: nh))
-        panel!.setFrame(NSRect(x: s.frame.midX - w / 2, y: s.frame.maxY - h, width: w, height: h), display: true)
-        model.kind = kind
-        model.project = project
+        model.rows = rows
+        layout()
         model.wave = false
         panel!.orderFrontRegardless()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.model.expanded = true }

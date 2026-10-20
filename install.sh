@@ -27,7 +27,7 @@ if os.path.exists(path):
         sys.exit(f"{path} is not valid JSON; fix it first. Nothing was changed.")
     shutil.copy(path, f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
 hooks = d.setdefault("hooks", {})
-for ev in ("Stop", "Notification", "StopFailure"):
+for ev in ("Stop", "Notification", "StopFailure", "SessionEnd"):
     lst = hooks.setdefault(ev, [])
     if not any(h.get("command") == cmd for e in lst for h in e.get("hooks", [])):
         lst.append({"hooks": [{"type": "command", "command": cmd}]})
